@@ -10,7 +10,7 @@
 addPrecinctPopulation <- function(dataDir = "../data",
                                   baseOutputDir = "output",
                                   precinctOutputDir = "output_precinct",
-                                  samplePercent = 0.1,
+                                  samplePercent = 0.1,  # should be the same as sample used for 'base'
                                   locationFile = "srl_stg1.sqlite",
                                   locationLayer = "stations",
                                   bufferDistance,
@@ -233,11 +233,11 @@ addPrecinctPopulation(
   # baseOutputDir = "output",
   baseOutputDir = "output-Sep10-10pct",
   precinctOutputDir = "output_precinct",
-  # samplePercent = 0.1,
-  samplePercent = 10,
+  # samplePercent = 0.1,  # should be the same as sample used for 'base'
+  samplePercent = 10,  # should be the same as sample used for 'base'
   locationFile = "srl_stg1.sqlite",  # must be in dataDir
   locationLayer = "stations",  # must be contained in locationFile
-  bufferDistance = 800,  # distance in metres (radius of precinct area around location point)
+  bufferDistance = 1600,  # distance in metres (radius of precinct area around location point)
   newPeople = 5000,  # number of additional people per precinct
   do.steps=c(T,T,T,T,T,T,T,T,T)
 )

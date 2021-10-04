@@ -35,7 +35,7 @@ samplePrecinctPopulation <- function(dataDir,
   for(i in 1:nrow(SA2s)) {
     printProgress(i,".")
     
-    SA1.pop <- read.csv(gzfile(df$file[i])) %>%
+    SA1.pop <- read.csv(gzfile(SA2s$file[i])) %>%
       group_by(SA1_7DIGCODE) %>%
       summarise(census_pop = n()) 
     
@@ -44,10 +44,6 @@ samplePrecinctPopulation <- function(dataDir,
   cat("\n")
   echo(paste0("Extracted SA1 population figures for  ", nrow(SA1.pops), " SA1s\n"))
   
-  
-  # calculating current census population of SA1s in precincts, with population 
-  # for partial SA1 apportioned on basis of area 
-  #----------------------------------------------------------------------------
   # read in SA1 locations, calculate area and join to population figures
   SA1s <- st_read(paste0(dataDir, "/absRegionsReprojected.sqlite"),
                   layer = "sa1_2016_aust") %>%
@@ -56,50 +52,67 @@ samplePrecinctPopulation <- function(dataDir,
     # replace NAs with 0 (these are SA1s with zero population, eg parks)
     mutate(census_pop = ifelse(is.na(census_pop), 0, census_pop))
   
-  # read in precinct location points and buffer to create precinct areas
+  
+  # create precincts: based on buffers around point locations, without overlaps
+  #----------------------------------------------------------------------------
+  # read in precinct locations
   precinct.locations <- st_read(paste0(dataDir, "/", locationFile),
                                 layer = locationLayer) %>%
-    st_buffer(., bufferDistance)
+    mutate(precinct_id = row_number())
   
-  # intersect precincts with SA1s and calculate population of each intersection area
-  precincts <- precinct.locations %>%
-    mutate(precinct_id = row_number()) %>%
+  # buffer precincts to bufferDistance
+  precinct.buffers <- st_buffer(precinct.locations, bufferDistance)
+  
+  # make voronoi tesselation for area containing precincts (used to eliminate overlaps)
+  tesselation <- st_voronoi(st_union(precinct.locations), st_union(precinct.buffers)) %>%
+    st_cast(.)  # splits geom collection into separate polygons
+  
+  # intersect buffers with tesselation
+  intersection.areas <- st_intersection(precinct.buffers, tesselation)
+  
+  # precincts: keep only the intersection areas containing the original centroids (overlaps eliminated)
+  precincts <- NULL
+  for (i in 1:nrow(precinct.locations)) {
+    selected.area <- intersection.areas %>%
+      filter(precinct_id == i) %>%
+      st_filter(., precinct.locations %>% filter(precinct_id == i), .predicate = st_contains)
+    precincts <- rbind(precincts, selected.area)
+  }
+  
+  # library(ggplot2)
+  # library(ggspatial)
+  # ggplot() +
+  # annotation_map_tile(type="osmgrayscale",zoom=12, alpha=0.6) +
+  #   geom_sf(data = precincts, color = "blue", fill = NA) + 
+  #   geom_sf(data = precinct.locations, color = "red")
+  # 
+  
+  # calculate current census population of SA1s in precincts, with population 
+  # for partial SA1 apportioned on basis of area 
+  #----------------------------------------------------------------------------
+  # intersect precincts with SA1s and calculate census population of each intersection area
+  precincts.intersected <- precincts %>%
     st_intersection(., SA1s) %>%
     mutate(isec_area = as.numeric(st_area(.)),
            isec_pop = (isec_area/orig_area) * census_pop) %>%
     st_drop_geometry()
   
-  
-  # for each precinct, apportion the additional people required in each SA1
-  #----------------------------------------------------------------------------
-  # sum of intersection populations for each precinct
-  precinct.pops <- precincts %>%
+  # sum of intersection census populations for each precinct
+  precinct.pops <- precincts.intersected %>%
     group_by(precinct_id) %>%
     summarise(precinct_pop = sum(isec_pop))
   
-  # apportioned additional population for each intersection area (additional population
-  # for precinct apportioned between intersection areas based on their current populations)
-  for (i in 1: nrow(precincts)) {
-    precinct.pop <- precinct.pops[precinct.pops$precinct_id == precincts[i, "precinct_id"], "precinct_pop"]
-    precincts[i, "additional_pop"] <- (precincts[i, "isec_pop"] / precinct.pop) * newPeople
+  # apportioned additional population for each intersection area: 
+  # additional population for precinct apportioned between intersection areas based on their census populations
+  for (i in 1:nrow(precincts.intersected)) {
+    precinct.pop <- precinct.pops[precinct.pops$precinct_id == precincts.intersected[i, "precinct_id"], "precinct_pop"]
+    precincts.intersected[i, "additional_pop"] <- (precincts.intersected[i, "isec_pop"] / precinct.pop) * newPeople
   }
   
-  # sum of additional population for each SA1, joined to SA2 codes and names
-  SA1.additional.pops <- precincts %>%
-    group_by(sa1_maincode_2016) %>%
-    # additional pop for each SA1 is the sum of the pops for its intersection areas 
-    summarise(additional_pop = sum(additional_pop)) %>%
-    # join SA2 codes and names
-    left_join(., SA1s %>% dplyr::select(sa1_maincode_2016, sa1_7digitcode_2016, sa2_maincode_2016), 
-              by = c("sa1_maincode_2016")) %>%
-    left_join(., SA2s %>% dplyr::select(SA2_NAME, SA2_MAINCODE_2016),
-              by = c("sa2_maincode_2016" = "SA2_MAINCODE_2016")) %>%
-    dplyr::select(-GEOMETRY)
   
-  
-  # for each SA1, determine  sample required, based on samplePercent
+  # for each precinct's SA1, determine sample required, based on samplePercent
   #----------------------------------------------------------------------------
-  SA1.additional.pops <- SA1.additional.pops %>%
+  precincts.intersected <- precincts.intersected %>%
     mutate(sample = additional_pop * samplePercent / 100)
   
   # where using small sample size, too many SA1s may be rounded to zero
@@ -114,9 +127,31 @@ samplePrecinctPopulation <- function(dataDir,
     y / up
   } 
   
-  SA1.additional.pops$sample <- round_preserve_sum(SA1.additional.pops$sample)
+  # determine additional sample pop for each SA1 area in each precinct
+  SA1.additional.pops <- NULL
+  for (i in 1:nrow(precinct.locations)) {
+    precinct.SA1s <- precincts.intersected %>%
+      filter(precinct_id == i)
+    precinct.SA1s$sample <- round_preserve_sum(precinct.SA1s$sample)
+    SA1.additional.pops <- rbind(SA1.additional.pops, precinct.SA1s)
+  }
   
-  
+  # sum of additional population for each SA1 (some may be in 2 precincts), joined to SA2 codes and names
+  SA1.additional.pops <- SA1.additional.pops %>%
+    group_by(sa1_maincode_2016) %>%
+    # total sample for each SA1 is the sum of the samples for each precinct it falls in 
+    summarise(sample = sum(sample)) %>%
+    # remove any with zero sample required
+    filter(sample > 0) %>%
+    # join SA2 codes and names
+    left_join(., SA1s %>% dplyr::select(sa1_maincode_2016, sa1_7digitcode_2016, sa2_maincode_2016), 
+              by = c("sa1_maincode_2016")) %>%
+    left_join(., SA2s %>% dplyr::select(SA2_NAME, SA2_MAINCODE_2016),
+              by = c("sa2_maincode_2016" = "SA2_MAINCODE_2016")) %>%
+    filter(!is.na(SA2_NAME)) %>%  # excludes any which are not in SA2 population files (eg Moorabbin Airport SA2, zero population)
+    dplyr::select(-GEOMETRY)
+
+
   # obtain the sample, taking the required number from each SA1
   #----------------------------------------------------------------------------
   precinctSample <- NULL
