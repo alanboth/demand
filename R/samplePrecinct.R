@@ -6,16 +6,49 @@ samplePrecinctPopulation <- function(dataDir,
                                      samplePercent,
                                      locationFile,
                                      locationLayer,
-                                     bufferDistance,
-                                     newPeople
+                                     bufferDistance
                                      ) {
   
-  # setting up: base sample and SA1 populations
+  # constants: apartment and other attached dwelling numbers, and people per dwelling
   #----------------------------------------------------------------------------
-  # read in base sample (used to ensure new precinct people don't appear in base sample)
-  baseSample <- read.csv(gzfile(paste0('../', baseOutputDir, "/2.sample/sample.csv.gz")))
+  # Calculated by samplePrecinctGetNumbers.R, which obtains numbers from 2016 Census Greater Melbourne GCCSA
+  # Alternatively, other constants could be are used.  Note that:
+  # - 'APT' and 'ATT' are numbers of apartments/other attached dwellings; they could be absolute numbers
+  #   or' percentages (eg 53, 47); their proportions are applied to the people per respective dwelling type
+  # - 'PERSON.PER.APT' an 'PERSON.PER.ATT' are average numbers of people per dwelling
+  source("samplePrecinctGetNumbers.R", local = TRUE)
+  dwelling.constants <- samplePrecinctGetNumbers()
   
-  # make table of SA2 names and codes
+  APT <- dwelling.constants[[1]]  # 231289 (number of apartments in Greater Melbourne GCCSA)
+  ATT <- dwelling.constants[[2]]  # 264405 (number of other attached dwellings in Greater Melbourne GCCSA)
+  PERSON.PER.APT <- dwelling.constants[[3]]  # 1.835937 (average people per apartment)
+  PERSON.PER.ATT <- dwelling.constants[[4]]  # 2.315822 (average people per other attached dwewlling)
+  
+  PERSON.PER.DENSE.DWELLING <- ((APT * PERSON.PER.APT) + (ATT * PERSON.PER.ATT)) / (APT + ATT)  # 2.09191
+  
+  
+  # setting up: meshblock dwellings and population, and SRL dwelling increases
+  #----------------------------------------------------------------------------
+  # read in base sample (used to ensure new precinct people don't appear in base sample) [not currently used]
+  # baseSample <- read.csv(gzfile(paste0('../', baseOutputDir, "/2.sample/sample.csv.gz")))
+
+  # read in meshblock dwelling and population counts
+  meshblock.counts <- read.csv(gzfile(paste0(dataDir, "/2016 census mesh block counts.csv.gz"))) %>%
+    replace(is.na(.), 0) %>% # where population/dwelling numbers not completed
+    mutate(MB_CODE_2016 = as.numeric(MB_CODE_2016))  # ignore 'NAs by coercion' warning, triggered by incomplete rows at end 
+  
+  # read in mrshblock locations, calculate area and join to population and dwelling figures
+  meshblocks <- st_read(paste0(dataDir, "/absRegionsReprojected.sqlite"),
+                        layer = "mb_2016_aust") %>%
+    mutate(orig_area = as.numeric(st_area(.))) %>%
+    left_join(meshblock.counts, by = c("mb_code_2016" = "MB_CODE_2016"))
+  
+  # make table of SA1 codes and corresponding SA2s
+  SA1Table <- meshblocks %>%
+    st_drop_geometry() %>%
+    distinct(sa1_maincode_2016, sa1_7digitcode_2016, sa2_maincode_2016)
+  
+  # make table of SA2 codes and corresopnding names
   SA2Table <- read.csv(gzfile(paste0(dataDir, "/sa1_2016_aust.csv.gz"))) %>%
     distinct(SA2_MAINCODE_2016, SA2_NAME_2016)
   
@@ -28,29 +61,10 @@ samplePrecinctPopulation <- function(dataDir,
     mutate(SA2_NAME = stringr::str_extract(string = file, pattern = "(?<=SA2/).*(?=/population)")) %>%
     left_join(., SA2Table, by = c("SA2_NAME" = "SA2_NAME_2016"))
   
-  # determine SA1 populations, from SA2 population files
-  SA1.pops <- NULL
-  
-  echo(paste0("Extracting SA1 populations figures from ", nrow(SA2s), " Melbourne SA2 population files\n"))
-  for(i in 1:nrow(SA2s)) {
-    printProgress(i,".")
-    
-    SA1.pop <- read.csv(gzfile(SA2s$file[i])) %>%
-      group_by(SA1_7DIGCODE) %>%
-      summarise(census_pop = n()) 
-    
-    SA1.pops <- rbind(SA1.pops, SA1.pop)
-  }
-  cat("\n")
-  echo(paste0("Extracted SA1 population figures for  ", nrow(SA1.pops), " SA1s\n"))
-  
-  # read in SA1 locations, calculate area and join to population figures
-  SA1s <- st_read(paste0(dataDir, "/absRegionsReprojected.sqlite"),
-                  layer = "sa1_2016_aust") %>%
-    mutate(orig_area = as.numeric(st_area(.))) %>%
-    left_join(SA1.pops, by = c("sa1_7digitcode_2016" = "SA1_7DIGCODE")) %>%
-    # replace NAs with 0 (these are SA1s with zero population, eg parks)
-    mutate(census_pop = ifelse(is.na(census_pop), 0, census_pop))
+  # read in SRL base case household projections from https://bigbuild.vic.gov.au/library/suburban-rail-loop/business-and-investment-case ,
+  # appendix C1, table B-18.  Code assumes contains columns for 'precinct', 'basecase' and 'programcaseoptionA'
+  SRL.household <- read.csv(paste0(dataDir, "/SRLBaseCase2056HouseholdProjections.csv")) %>%
+    rename(precinct = 1)  # fixes read-in naming error in column 1
   
   
   # create precincts: based on buffers around point locations, without overlaps
@@ -87,33 +101,35 @@ samplePrecinctPopulation <- function(dataDir,
   #   geom_sf(data = precinct.locations, color = "red")
   # 
   
-  # calculate current census population of SA1s in precincts, with population 
-  # for partial SA1 apportioned on basis of area 
+  # calculate current census dwellings and population of meshblocks in precincts,  
+  # with dwellings and population for partial meshblocks apportioned on basis of area 
   #----------------------------------------------------------------------------
-  # intersect precincts with SA1s and calculate census population of each intersection area
+  # intersect precincts with meshblocks and calculate census dwellings and population of each intersection area
   precincts.intersected <- precincts %>%
-    st_intersection(., SA1s) %>%
+    st_intersection(., meshblocks) %>%
     mutate(isec_area = as.numeric(st_area(.)),
-           isec_pop = (isec_area/orig_area) * census_pop) %>%
+           isec_dwell = (isec_area/orig_area) * Dwelling,
+           isec_pop = (isec_area/orig_area) * Person) %>%
     st_drop_geometry()
   
-  # sum of intersection census populations for each precinct
-  precinct.pops <- precincts.intersected %>%
-    group_by(precinct_id) %>%
-    summarise(precinct_pop = sum(isec_pop))
+  # join dwelling and pop data to precinct meshblocks, and calculate additional population required
+  # for each meshblock, based on the base case uplift for the relevant precinct
+  precinct.meshblocks.additional.pop <- precincts.intersected %>%
+    left_join(SRL.household, by = c("stations" = "precinct")) %>%
+    mutate(dwelling.uplift = (ProgramCaseOptionA - BaseCase) / BaseCase,  # the SRL BAse Case uplift for the precinct
+           additional.dwellings = isec_dwell * dwelling.uplift,
+           additional.pop = additional.dwellings * PERSON.PER.DENSE.DWELLING)
   
-  # apportioned additional population for each intersection area: 
-  # additional population for precinct apportioned between intersection areas based on their census populations
-  for (i in 1:nrow(precincts.intersected)) {
-    precinct.pop <- precinct.pops[precinct.pops$precinct_id == precincts.intersected[i, "precinct_id"], "precinct_pop"]
-    precincts.intersected[i, "additional_pop"] <- (precincts.intersected[i, "isec_pop"] / precinct.pop) * newPeople
-  }
+  # summarise additional meshblock population by precinct and SA1, to find number required for each SA1
+  precinct.SA1s.additional.pop <- precinct.meshblocks.additional.pop %>%
+    group_by(precinct_id, sa1_maincode_2016) %>%
+    summarise(SA1.additional.pop = sum(additional.pop))
   
-  
+
   # for each precinct's SA1, determine sample required, based on samplePercent
   #----------------------------------------------------------------------------
-  precincts.intersected <- precincts.intersected %>%
-    mutate(sample = additional_pop * samplePercent / 100)
+  precinct.SA1s.additional.pop <- precinct.SA1s.additional.pop %>%
+    mutate(sample = SA1.additional.pop * samplePercent / 100)
   
   # where using small sample size, too many SA1s may be rounded to zero
   # function to keep largest remainders, resulting in total remaining correct, from
@@ -130,7 +146,7 @@ samplePrecinctPopulation <- function(dataDir,
   # determine additional sample pop for each SA1 area in each precinct
   SA1.additional.pops <- NULL
   for (i in 1:nrow(precinct.locations)) {
-    precinct.SA1s <- precincts.intersected %>%
+    precinct.SA1s <- precinct.SA1s.additional.pop %>%
       filter(precinct_id == i)
     precinct.SA1s$sample <- round_preserve_sum(precinct.SA1s$sample)
     SA1.additional.pops <- rbind(SA1.additional.pops, precinct.SA1s)
@@ -144,12 +160,11 @@ samplePrecinctPopulation <- function(dataDir,
     # remove any with zero sample required
     filter(sample > 0) %>%
     # join SA2 codes and names
-    left_join(., SA1s %>% dplyr::select(sa1_maincode_2016, sa1_7digitcode_2016, sa2_maincode_2016), 
+    left_join(., SA1Table, 
               by = c("sa1_maincode_2016")) %>%
     left_join(., SA2s %>% dplyr::select(SA2_NAME, SA2_MAINCODE_2016),
               by = c("sa2_maincode_2016" = "SA2_MAINCODE_2016")) %>%
-    filter(!is.na(SA2_NAME)) %>%  # excludes any which are not in SA2 population files (eg Moorabbin Airport SA2, zero population)
-    dplyr::select(-GEOMETRY)
+    filter(!is.na(SA2_NAME)) # excludes any which are not in SA2 population files (eg Moorabbin Airport SA2, zero population)
 
 
   # obtain the sample, taking the required number from each SA1
@@ -160,17 +175,18 @@ samplePrecinctPopulation <- function(dataDir,
   for (i in 1:nrow(SA1.additional.pops)) {
     printProgress(i,".")
     
-    # extract all people who live in the SA1 and were not in base sample
+    # extract all people who live in the SA1 [and were not in base sample - not currently used]
     file <- SA2s %>%
       filter(SA2_NAME == as.character(SA1.additional.pops[i, "SA2_NAME"])) %>%
       .$file
     candidates <- read.csv(gzfile(file)) %>%
-      filter(SA1_7DIGCODE == as.character(SA1.additional.pops[i, "sa1_7digitcode_2016"])) %>%
-      filter(!AgentId %in% baseSample$AgentId)
+      filter(SA1_7DIGCODE == as.character(SA1.additional.pops[i, "sa1_7digitcode_2016"])) #%>%
+      # filter(!AgentId %in% baseSample$AgentId)  # [not currently used
     
     # sample the relevant number of people from the candidate people
     sampleSet <- candidates[sample(nrow(candidates), 
-                                   as.numeric(SA1.additional.pops[i, "sample"])),]
+                                   size = as.numeric(SA1.additional.pops[i, "sample"]),
+                                   replace = TRUE), ]  #  sampling with replacement - ensure never run out of people
     
     # add SA1_MAINCODE (required for consistency with base sample)
     sampleSet <- sampleSet %>%
@@ -178,6 +194,11 @@ samplePrecinctPopulation <- function(dataDir,
     
     precinctSample <- rbind(precinctSample, sampleSet)
   }
+  
+  # add a suffix to AgentIDs, so that any duplicates will have unique IDs ("PR" stands for "precinct")
+  precinctSample <- precinctSample %>%
+    mutate(AgentId = paste0(AgentId, "PR", row_number()))
+    
   cat("\n")
   echo(paste0("Extracted a sample of ", nrow(precinctSample), " people\n"))
   

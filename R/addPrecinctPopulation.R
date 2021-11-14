@@ -1,5 +1,8 @@
-# Function to add an additional sample of people ('newPeople') from defined
-# precincts to an existing sample population ('base')
+# Function to add an additional sample of people from defined precincts to an existing
+# sample population.  Number determined by constants in 'samplePrecinct.R' - currently 
+# set to use increasses in dwelling numbers specified in the SRL Base Case, and a high density
+# (apartment/other attached dwelling) mix, and people per dwelling, based on 
+# Greater Melbourne GCCSA averages from 2016 census
 
 # Uses pre-processed Vista and locations data from base folder '1.setup' and
 # the  sample from base folder '2.sample' as inputs
@@ -14,7 +17,6 @@ addPrecinctPopulation <- function(dataDir = "../data",
                                   locationFile = "srl_stg1.sqlite",
                                   locationLayer = "stations",
                                   bufferDistance,
-                                  newPeople,
                                   do.steps=c(T,T,T,T,T,T,T,T,T)) {
   
   # load general purpose utility functions
@@ -57,8 +59,7 @@ addPrecinctPopulation <- function(dataDir = "../data",
       samplePercent,
       locationFile,
       locationLayer,
-      bufferDistance,
-      newPeople
+      bufferDistance
     )
   }
   
@@ -238,7 +239,6 @@ addPrecinctPopulation(
   locationFile = "srl_stg1.sqlite",  # must be in dataDir
   locationLayer = "stations",  # must be contained in locationFile
   bufferDistance = 1600,  # distance in metres (radius of precinct area around location point)
-  newPeople = 5000,  # number of additional people per precinct
   do.steps=c(T,T,T,T,T,T,T,T,T)
 )
 
